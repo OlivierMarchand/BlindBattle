@@ -7,6 +7,7 @@
   let audio = null;
   let ctx = null;
   let timer = null;
+  let startInFlight = false;
 
   const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const setStatus = (text, mode = '') => { const el = qs('#connectionStatus'); el.textContent = text; el.className = `status ${mode}`; };
@@ -48,11 +49,43 @@
     socket.emit('settings', { themeId: id, roundCount: Number(qs('#rounds').value) });
   }
 
+  function resetStartButton() {
+    const btn = qs('#startBtn');
+    if (!btn) return;
+    startInFlight = false;
+    btn.disabled = false;
+    btn.textContent = 'Lancer la partie';
+  }
+
   function startGame() {
-    qs('#startBtn').disabled = true;
+    const error = qs('#startError');
+    const btn = qs('#startBtn');
+    if (error) error.textContent = '';
+    if (startInFlight) return;
+    if (!socket?.connected) {
+      if (error) error.textContent = 'Connexion perdue. Attends la reconnexion puis réessaie.';
+      return;
+    }
+    if (state.hostId !== me) {
+      if (error) error.textContent = 'Seul l’hôte peut lancer la partie.';
+      return;
+    }
+
+    // Make sure the last visible settings are sent before start.
+    socket.emit('settings', { themeId: state.themeId, roundCount: Number(qs('#rounds').value) });
+    unlockAudio();
+    startInFlight = true;
+    btn.disabled = true;
+    btn.textContent = 'Lancement…';
+    console.log('[BlindBattle] start requested', state.code, state.themeId, qs('#rounds').value);
+
     socket.timeout(8000).emit('start', {}, (err, r) => {
-      qs('#startBtn').disabled = false;
-      if (err || !r?.ok) alert(r?.error || 'Impossible de lancer la partie.');
+      console.log('[BlindBattle] start ack', err, r);
+      if (err || !r?.ok) {
+        resetStartButton();
+        if (error) error.textContent = r?.error || 'Le serveur n’a pas démarré la partie. Réessaie.';
+      }
+      // On success the room/round events move everyone to the game screen.
     });
   }
 
@@ -84,8 +117,15 @@
 
   function playClip(clip, notes, startsAt) {
     const go = () => {
-      if (clip) { audio = new Audio(clip); audio.play().catch(() => toast('Clique sur la page pour activer le son')); }
-      else synth(notes);
+      if (clip) {
+        if (audio) { audio.pause(); audio = null; }
+        audio = new Audio(clip);
+        audio.preload = 'auto';
+        audio.play().catch(err => {
+          console.warn('[BlindBattle] audio play blocked/failed', err);
+          toast('Clique une fois sur la page pour activer le son');
+        });
+      } else synth(notes);
     };
     setTimeout(go, Math.max(0, startsAt - Date.now()));
   }
@@ -103,8 +143,12 @@
     qs('#rounds').value = state.roundCount;
     qs('#startBtn').style.display = state.hostId === me ? 'inline-block' : 'none';
     qs('#scores').innerHTML = [...state.players].sort((a,b) => b.score - a.score).map((p,i) => `<div class="score"><span>${i+1}. ${esc(p.name)}${p.shield ? ' 🛡️' : ''}</span><b>${p.score}</b></div>`).join('');
-    if (state.phase === 'lobby') show('lobby');
-    else if (['loading','playing','reveal'].includes(state.phase)) show('game');
+    if (state.phase === 'lobby') {
+      if (!startInFlight) resetStartButton();
+      show('lobby');
+    } else if (['loading','playing','reveal'].includes(state.phase)) {
+      show('game');
+    }
   }
 
   const powerName = t => ({ shield:'🛡️ Bouclier', freeze:'❄️ Freeze', blackout:'🌑 Blackout', tax:'💸 Taxe' }[t] || t);
@@ -124,11 +168,12 @@
   function initSocket() {
     socket = io({ transports: ['polling', 'websocket'], timeout: 7000 });
     socket.on('connect', () => { setStatus('● En ligne', 'ok'); setButtons(true); });
-    socket.on('disconnect', () => { setStatus('● Reconnexion…', 'bad'); setButtons(false); });
+    socket.on('disconnect', () => { setStatus('● Reconnexion…', 'bad'); setButtons(false); resetStartButton(); });
     socket.on('connect_error', err => { console.error('Socket error', err); setStatus('● Hors ligne', 'bad'); setButtons(false); qs('#createError').textContent = 'Connexion temps réel impossible.'; });
     socket.on('room', r => { state = r; render(); });
     socket.on('inv', x => { inventory = x; renderInv(); });
     socket.on('round', r => {
+      startInFlight = false;
       qs('#reveal').classList.remove('on'); qs('#finish').classList.remove('on');
       qs('#roundLabel').textContent = `Manche ${r.round} / ${r.total}`; qs('#answer').disabled = false;
       playClip(r.clip, r.notes, r.startsAt); clearInterval(timer);
@@ -142,7 +187,11 @@
   window.addEventListener('DOMContentLoaded', () => {
     qs('#createBtn').addEventListener('click', createRoom);
     qs('#joinBtn').addEventListener('click', joinRoom);
-    qs('#startBtn').addEventListener('click', startGame);
+    // Delegated handler survives any future lobby re-render and works for mouse/touch.
+    document.addEventListener('click', e => {
+      const start = e.target.closest?.('#startBtn');
+      if (start) { e.preventDefault(); startGame(); }
+    });
     qs('#answerBtn').addEventListener('click', submitAnswer);
     qs('#answer').addEventListener('keydown', e => { if (e.key === 'Enter') submitAnswer(); });
     qs('#rounds').addEventListener('change', () => { if (state.code) socket.emit('settings', { themeId: state.themeId, roundCount: Number(qs('#rounds').value) }); });
