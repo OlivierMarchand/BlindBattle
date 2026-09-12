@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#0a0911">
+  <title>Blind Battle</title>
+  <script src="/socket.io/socket.io.js" defer></script>
+  <script src="/app.js" defer></script>
+  <style>
+    *{box-sizing:border-box}body{margin:0;font-family:Inter,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:radial-gradient(circle at 18% 0,#32205a,#090910 45%);color:#fff;min-height:100vh}main{max-width:980px;margin:auto;padding:24px}.top{display:flex;justify-content:space-between;align-items:center}.brand{font-weight:950;font-size:26px}.grad{background:linear-gradient(90deg,#ff4fd8,#8b5cff,#43e8ff);-webkit-background-clip:text;color:transparent}.status{font-size:13px;color:#aaa;background:#ffffff0b;border:1px solid #ffffff12;padding:7px 10px;border-radius:99px}.status.ok{color:#7dffb0}.status.bad{color:#ff8787}h1{font-size:64px;line-height:.95;margin:80px 0 18px;letter-spacing:-.05em}p{color:#aaa}.card{background:#141420dd;border:1px solid #ffffff18;border-radius:22px;padding:20px;box-shadow:0 20px 70px #0008}.grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}.row{display:flex;gap:10px}.stack{display:grid;gap:10px}.btn,input,select{border-radius:13px;border:1px solid #ffffff20;padding:13px 15px;font:inherit}.btn{border:0;background:linear-gradient(135deg,#ff4fd8,#785cff,#35dfff);color:white;font-weight:850;cursor:pointer}.btn:disabled{opacity:.45;cursor:not-allowed}.ghost{background:#242438}.screen{display:none}.screen.on{display:block}.themes{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}.theme{padding:15px;border:1px solid #ffffff18;border-radius:16px;cursor:pointer;background:#ffffff08}.theme.sel{border-color:#43e8ff;background:#43e8ff12}.players,.scores,.inv{display:grid;gap:8px}.player,.score,.power{padding:11px;border-radius:13px;background:#ffffff08;display:flex;justify-content:space-between;gap:10px}.code{font-size:34px;font-weight:950;letter-spacing:.14em}.disc{width:180px;height:180px;margin:30px auto;border-radius:50%;background:repeating-radial-gradient(circle,#181824 0 4px,#08080d 5px 10px);display:grid;place-items:center;font-size:44px;animation:spin 5s linear infinite}.answer{max-width:560px;margin:0 auto}.answer input{width:100%;margin-bottom:10px;background:#090910;color:white}.timer{height:7px;background:#ffffff12;border-radius:99px;overflow:hidden}.bar{height:100%;background:linear-gradient(90deg,#43e8ff,#ff4fd8)}.overlay{position:fixed;inset:0;background:#050509dd;display:none;place-items:center;z-index:5;padding:20px}.overlay.on{display:grid}.big{font-size:42px;font-weight:950}.toast{position:fixed;right:20px;bottom:20px;background:#222238;padding:14px;border-radius:13px;z-index:10}.black{filter:blur(10px) brightness(.4)}.error{color:#ff9c9c;min-height:1.2em;margin-top:10px}.hint{font-size:13px;color:#7f7f92;margin-top:10px}@keyframes spin{to{transform:rotate(360deg)}}@media(max-width:700px){h1{font-size:48px;margin-top:48px}.grid,.themes{grid-template-columns:1fr}.row{flex-wrap:wrap}.code{font-size:30px}}
+  </style>
+</head>
+<body>
+<main id="app">
+  <div class="top"><div class="brand">BLIND <span class="grad">BATTLE</span></div><div id="connectionStatus" class="status">Connexion…</div></div>
+
+  <section id="home" class="screen on">
+    <h1>Reconnais le son.<br><span class="grad">Sabote tes amis.</span></h1>
+    <p>Blind test musical compétitif, 2 à 8 joueurs.</p>
+    <div class="grid">
+      <div class="card"><h3>Créer une partie</h3><div class="row"><input id="hostName" placeholder="Ton prénom" autocomplete="name"><button id="createBtn" class="btn" disabled>Créer le salon</button></div><div id="createError" class="error"></div></div>
+      <div class="card"><h3>Rejoindre</h3><div class="stack"><input id="joinName" placeholder="Ton prénom" autocomplete="name"><div class="row"><input id="joinCode" placeholder="CODE" maxlength="5" autocapitalize="characters"><button id="joinBtn" class="btn" disabled>Rejoindre</button></div></div><div id="joinError" class="error"></div></div>
+    </div>
+  </section>
+
+  <section id="lobby" class="screen">
+    <div class="row" style="justify-content:space-between;align-items:center"><div><small>CODE DU SALON</small><div class="code" id="roomCode"></div></div><button id="copyBtn" class="btn ghost">Copier le lien</button></div>
+    <div class="grid" style="margin-top:20px">
+      <div class="card"><h3>Joueurs</h3><div class="players" id="players"></div></div>
+      <div class="card"><h3>Thème</h3><div class="themes" id="themes"></div><div class="row" style="margin-top:14px"><select id="rounds"><option>3</option><option>4</option><option>5</option><option selected>6</option><option>7</option><option>8</option></select><button id="startBtn" class="btn">Lancer la partie</button></div><div class="hint">Le premier clic sur la page active également le son dans le navigateur.</div></div>
+    </div>
+  </section>
+
+  <section id="game" class="screen">
+    <div class="row" style="justify-content:space-between"><h2 id="roundLabel"></h2><b id="timeText"></b></div><div class="timer"><div class="bar" id="bar"></div></div>
+    <div class="grid" style="margin-top:16px"><div class="card"><div class="disc">🎵</div><div class="answer"><input id="answer" placeholder="Titre ou artiste…"><button id="answerBtn" class="btn" style="width:100%">Valider</button><div id="feedback"></div></div></div><div><div class="card"><h3>Classement</h3><div class="scores" id="scores"></div></div><div class="card" style="margin-top:16px"><h3>Bonus</h3><div class="inv" id="inv"></div></div></div></div>
+  </section>
+</main>
+
+<div class="overlay" id="reveal"><div class="card" style="text-align:center"><small>RÉPONSE</small><div class="big" id="revealTitle"></div><p id="revealArtist"></p></div></div>
+<div class="overlay" id="finish"><div class="card" style="text-align:center;min-width:320px"><div style="font-size:60px">🏆</div><div class="big">Résultats</div><div id="final"></div><button id="rematch" class="btn">Revanche</button></div></div>
+</body>
+</html>
