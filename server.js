@@ -1,51 +1,293 @@
-const express=require('express');const http=require('http');const crypto=require('crypto');const{Server}=require('socket.io');
-const app=express(),server=http.createServer(app),io=new Server(server),PORT=process.env.PORT||3000;
-const rooms=new Map(),ROUND=16000,REVEAL=3500,BONUS=['shield','freeze','blackout','tax'];
-const demo=[
-{id:'neon',name:'Électro Neon',emoji:'⚡',tracks:[['Neon Run','Nova Circuit',[220,277,330,440]],['Pixel Hearts','Arcade Bloom',[262,330,392,523]],['Midnight Voltage','Static Love',[196,247,294,392]],['Laser City','Night Drive',[233,294,349,466]],['Chrome Dreams','Violet Pulse',[208,262,330,415]],['Electric Sunrise','Future Kids',[247,311,370,494]],['Digital Fever','Mono Club',[220,294,349,440]],['Afterglow','Signal 88',[196,262,330,392]]]},
-{id:'arcade',name:'Retro Arcade',emoji:'👾',tracks:[['High Score','Bit Runner',[262,392,523,659]],['Continue?','Player Two',[220,330,440,660]],['Boss Level','8-Bit Heroes',[196,294,392,587]],['Extra Life','Coin Op',[247,370,494,740]],['Game Over','CRT Kids',[208,311,415,622]],['Secret Stage','Pixel Quest',[233,349,466,698]],['Power Up','Joystick Jam',[262,330,494,659]],['Warp Zone','Level Select',[196,262,392,523]]]},
-{id:'cinema',name:'Cinématique',emoji:'🎬',tracks:[['Last Horizon','Orion Pictures',[174,220,261,349]],['The Chase','Silver Frame',[196,247,294,392]],['Final Scene','Atlas Orchestra',[165,220,330,440]],['Hidden City','Northlight',[185,233,277,370]],['No Turning Back','Epic Room',[174,261,349,523]],['First Light','Cobalt Score',[196,294,440,587]],['The Reveal','Glass Cinema',[220,277,415,554]],['End Credits','Moonline',[165,247,330,494]]]}];
-const extThemes=[['pop','Pop','🎤','pop'],['rock','Rock','🎸','rock'],['electro','Électro','🪩','electronic'],['hiphop','Hip-Hop','🔥','hiphop'],['funk','Funk & Groove','🕺','funk'],['chill','Chill','🌙','chillout']];
-const jamendo=()=>!!process.env.JAMENDO_CLIENT_ID;
-const themes=()=>[...demo.map(x=>({id:x.id,name:x.name,emoji:x.emoji,provider:'demo'})),...(jamendo()?extThemes.map(([id,name,emoji])=>({id,name,emoji,provider:'jamendo'})):[])];
-function norm(s=''){return s.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9]+/g,' ').trim()}
-function ok(g,t){g=norm(g);return t.accepted.some(a=>{a=norm(a);return g===a||(g.length>6&&a.length>6&&a.includes(g))})}
-function code(){let s='',c='ABCDEFGHJKLMNPQRSTUVWXYZ23456789';do{s=Array.from({length:5},()=>c[Math.random()*c.length|0]).join('')}while(rooms.has(s));return s}
-function pv(p){return{id:p.id,name:p.name,score:p.score,streak:p.streak,host:p.host,shield:p.shield,bonusCount:p.inv.length}}
-function rv(r){return{code:r.code,phase:r.phase,themeId:r.themeId,roundCount:r.roundCount,roundIndex:r.roundIndex,players:[...r.players.values()].map(pv),hostId:r.hostId,themes:themes()}}
-function send(r){io.to(r.code).emit('room',rv(r));for(const p of r.players.values())io.to(p.id).emit('inv',p.inv)}
-function shuffle(a){a=[...a];for(let i=a.length-1;i;i--){let j=Math.random()*(i+1)|0;[a[i],a[j]]=[a[j],a[i]]}return a}
-async function queue(themeId,n){let d=demo.find(x=>x.id===themeId);if(d)return shuffle(d.tracks).slice(0,n).map(([title,artist,notes])=>({title,artist,notes,accepted:[title,artist]}));if(!jamendo())throw Error('music');let e=extThemes.find(x=>x[0]===themeId);if(!e)throw Error('theme');let u=new URL('https://api.jamendo.com/v3.0/tracks/');u.searchParams.set('client_id',process.env.JAMENDO_CLIENT_ID);u.searchParams.set('format','json');u.searchParams.set('limit',Math.max(20,n*3));u.searchParams.set('tags',e[3]);u.searchParams.set('audioformat','mp32');u.searchParams.set('order','popularity_total');let j=await fetch(u);if(!j.ok)throw Error('jamendo');let data=await j.json();return shuffle(data.results||[]).slice(0,n).map(x=>({title:x.name,artist:x.artist_name,clip:x.audio,accepted:[x.name,x.artist_name]}))}
-function finish(r){r.phase='finished';clearTimeout(r.timer);io.to(r.code).emit('finished',{ranking:[...r.players.values()].sort((a,b)=>b.score-a.score).map(pv)});send(r)}
-function end(r){if(r.phase!=='playing')return;clearTimeout(r.timer);r.phase='reveal';let t=r.current;for(let p of r.players.values())if(!r.correct.has(p.id))p.streak=0;io.to(r.code).emit('reveal',{title:t.title,artist:t.artist});send(r);r.timer=setTimeout(()=>r.roundIndex>=r.q.length-1?finish(r):start(r),REVEAL)}
-function start(r){r.phase='playing';r.roundIndex++;r.current=r.q[r.roundIndex];r.correct=new Set();r.first=null;r.ends=Date.now()+ROUND+900;io.to(r.code).emit('round',{round:r.roundIndex+1,total:r.q.length,startsAt:Date.now()+900,endsAt:r.ends,clip:r.current.clip||null,notes:r.current.notes||null,themeId:r.themeId});send(r);r.timer=setTimeout(()=>end(r),ROUND+900)}
-function award(p){if(p.inv.length>=2||Math.random()>(p.streak>=2?.65:.38))return;p.inv.push({id:crypto.randomUUID(),type:BONUS[Math.random()*BONUS.length|0]})}
-io.on('connection',s=>{s.emit('themes',themes());
-s.on('create',({name},cb=()=>{})=>{let c=code(),p={id:s.id,name:String(name||'Player').slice(0,18),score:0,streak:0,host:true,shield:false,inv:[]};let r={code:c,hostId:s.id,players:new Map([[s.id,p]]),phase:'lobby',themeId:themes()[0].id,roundCount:6,roundIndex:-1,q:[],timer:null};rooms.set(c,r);s.join(c);s.data.code=c;cb({ok:true,code:c,id:s.id});send(r)});
-s.on('join',({code:c,name},cb=()=>{})=>{c=String(c||'').toUpperCase();let r=rooms.get(c);if(!r)return cb({ok:false,error:'Salon introuvable'});if(r.phase!=='lobby')return cb({ok:false,error:'Partie déjà commencée'});if(r.players.size>=8)return cb({ok:false,error:'Salon complet'});let p={id:s.id,name:String(name||'Player').slice(0,18),score:0,streak:0,host:false,shield:false,inv:[]};r.players.set(s.id,p);s.join(c);s.data.code=c;cb({ok:true,code:c,id:s.id});send(r)});
-s.on('settings',x=>{let r=rooms.get(s.data.code);if(!r||r.hostId!==s.id||r.phase!=='lobby')return;if(themes().some(t=>t.id===x.themeId))r.themeId=x.themeId;r.roundCount=Math.max(3,Math.min(8,+x.roundCount||6));send(r)});
-s.on('start',async(_,cb=()=>{})=>{let r=rooms.get(s.data.code);if(!r||r.hostId!==s.id)return;try{r.phase='loading';send(r);r.q=await queue(r.themeId,r.roundCount);r.roundIndex=-1;for(let p of r.players.values()){p.score=0;p.streak=0;p.shield=false;p.inv=[];p.frozenUntil=0}cb({ok:true});start(r)}catch(e){r.phase='lobby';send(r);cb({ok:false,error:'Impossible de charger la musique'})}});
-s.on('answer',({text},cb=()=>{})=>{let r=rooms.get(s.data.code),p=r?.players.get(s.id);if(!r||!p||r.phase!=='playing'||r.correct.has(p.id))return cb({ok:false});if(Date.now()<(p.frozenUntil||0))return cb({ok:false,error:'freeze'});if(!ok(text,r.current))return cb({ok:true,correct:false});let rem=Math.max(0,r.ends-Date.now()),pts=Math.round(520+680*(rem/ROUND)+Math.min(225,p.streak*75));p.streak++;if(!r.first){r.first=p.id;pts+=150}p.score+=pts;r.correct.add(p.id);award(p);io.to(p.id).emit('answerResult',{correct:true,points:pts});io.to(r.code).emit('correct',{name:p.name,id:p.id});send(r);cb({ok:true,correct:true,points:pts})});
-s.on('bonus',({bonusId,targetId},cb=()=>{})=>{let r=rooms.get(s.data.code),p=r?.players.get(s.id);if(!r||!p)return;let i=p.inv.findIndex(b=>b.id===bonusId);if(i<0)return;let b=p.inv[i];if(b.type==='shield'){p.shield=true;p.inv.splice(i,1);send(r);return cb({ok:true})}let t=r.players.get(targetId);if(!t||t.id===p.id)return; p.inv.splice(i,1);let blocked=t.shield;if(blocked)t.shield=false;else if(b.type==='freeze'){t.frozenUntil=Date.now()+4000;io.to(t.id).emit('effect',{type:'freeze',ms:4000,source:p.name})}else if(b.type==='blackout')io.to(t.id).emit('effect',{type:'blackout',ms:4000,source:p.name});else if(b.type==='tax'){t.score=Math.max(0,t.score-200);io.to(t.id).emit('effect',{type:'tax',source:p.name})}send(r);cb({ok:true,blocked})});
-s.on('rematch',()=>{let r=rooms.get(s.data.code);if(!r||r.hostId!==s.id)return;r.phase='lobby';r.roundIndex=-1;send(r)});
-s.on('disconnect',()=>{let r=rooms.get(s.data.code);if(!r)return;r.players.delete(s.id);if(!r.players.size){clearTimeout(r.timer);return rooms.delete(r.code)}if(r.hostId===s.id){let n=r.players.values().next().value;n.host=true;r.hostId=n.id}send(r)})});
-app.get('/api/health',(_,res)=>res.json({ok:true,music:jamendo()?'jamendo+demo':'demo'}));
-app.get('/',(_,res)=>res.type('html').send(`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Blind Battle</title><script src="/socket.io/socket.io.js"></script><style>*{box-sizing:border-box}body{margin:0;font-family:Inter,system-ui;background:radial-gradient(circle at 20% 0,#32205a,#090910 45%);color:#fff;min-height:100vh}main{max-width:980px;margin:auto;padding:24px}.brand{font-weight:950;font-size:26px}.grad{background:linear-gradient(90deg,#ff4fd8,#8b5cff,#43e8ff);-webkit-background-clip:text;color:transparent}h1{font-size:64px;line-height:.95;margin:80px 0 18px;letter-spacing:-.05em}p{color:#aaa}.card{background:#141420dd;border:1px solid #ffffff18;border-radius:22px;padding:20px;box-shadow:0 20px 70px #0008}.grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}.row{display:flex;gap:10px}.btn,input,select{border-radius:13px;border:1px solid #ffffff20;padding:13px 15px;font:inherit}.btn{border:0;background:linear-gradient(135deg,#ff4fd8,#785cff,#35dfff);color:white;font-weight:850;cursor:pointer}.ghost{background:#242438}.screen{display:none}.screen.on{display:block}.themes{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}.theme{padding:15px;border:1px solid #ffffff18;border-radius:16px;cursor:pointer;background:#ffffff08}.theme.sel{border-color:#43e8ff;background:#43e8ff12}.players,.scores,.inv{display:grid;gap:8px}.player,.score,.power{padding:11px;border-radius:13px;background:#ffffff08;display:flex;justify-content:space-between}.code{font-size:34px;font-weight:950;letter-spacing:.14em}.disc{width:180px;height:180px;margin:30px auto;border-radius:50%;background:repeating-radial-gradient(circle,#181824 0 4px,#08080d 5px 10px);display:grid;place-items:center;font-size:44px;animation:spin 5s linear infinite}.answer{max-width:560px;margin:0 auto}.answer input{width:100%;margin-bottom:10px;background:#090910;color:white}.timer{height:7px;background:#ffffff12;border-radius:99px;overflow:hidden}.bar{height:100%;background:linear-gradient(90deg,#43e8ff,#ff4fd8)}.overlay{position:fixed;inset:0;background:#050509dd;display:none;place-items:center;z-index:5}.overlay.on{display:grid}.big{font-size:42px;font-weight:950}.toast{position:fixed;right:20px;bottom:20px;background:#222238;padding:14px;border-radius:13px}.black{filter:blur(10px) brightness(.4)}@keyframes spin{to{transform:rotate(360deg)}}@media(max-width:700px){h1{font-size:48px;margin-top:48px}.grid,.themes{grid-template-columns:1fr}.row{flex-wrap:wrap}}</style></head><body><main id="app"><div class="brand">BLIND <span class="grad">BATTLE</span></div><section id="home" class="screen on"><h1>Reconnais le son.<br><span class="grad">Sabote tes amis.</span></h1><p>Blind test musical compétitif, 2 à 8 joueurs.</p><div class="grid"><div class="card"><h3>Créer une partie</h3><input id="hostName" placeholder="Ton prénom"><button class="btn" onclick="createRoom()">Créer le salon</button></div><div class="card"><h3>Rejoindre</h3><input id="joinName" placeholder="Ton prénom"><input id="joinCode" placeholder="CODE"><button class="btn" onclick="joinRoom()">Rejoindre</button></div></div></section><section id="lobby" class="screen"><div class="row" style="justify-content:space-between;align-items:center"><div><small>CODE DU SALON</small><div class="code" id="roomCode"></div></div><button class="btn ghost" onclick="navigator.clipboard.writeText(location.href+'?room='+state.code)">Copier le lien</button></div><div class="grid" style="margin-top:20px"><div class="card"><h3>Joueurs</h3><div class="players" id="players"></div></div><div class="card"><h3>Thème</h3><div class="themes" id="themes"></div><div class="row" style="margin-top:14px"><select id="rounds"><option>3</option><option>4</option><option>5</option><option selected>6</option><option>7</option><option>8</option></select><button id="startBtn" class="btn" onclick="startGame()">Lancer la partie</button></div></div></div></section><section id="game" class="screen"><div class="row" style="justify-content:space-between"><h2 id="roundLabel"></h2><b id="timeText"></b></div><div class="timer"><div class="bar" id="bar"></div></div><div class="grid" style="margin-top:16px"><div class="card"><div class="disc">🎵</div><div class="answer"><input id="answer" placeholder="Titre ou artiste…" onkeydown="if(event.key==='Enter')submitAnswer()"><button class="btn" style="width:100%" onclick="submitAnswer()">Valider</button><div id="feedback"></div></div></div><div><div class="card"><h3>Classement</h3><div class="scores" id="scores"></div></div><div class="card" style="margin-top:16px"><h3>Bonus</h3><div class="inv" id="inv"></div></div></div></div></section></main><div class="overlay" id="reveal"><div class="card" style="text-align:center"><small>RÉPONSE</small><div class="big" id="revealTitle"></div><p id="revealArtist"></p></div></div><div class="overlay" id="finish"><div class="card" style="text-align:center;min-width:320px"><div style="font-size:60px">🏆</div><div class="big">Résultats</div><div id="final"></div><button id="rematch" class="btn" onclick="socket.emit('rematch')">Revanche</button></div></div><script>
-const socket=io(),qs=s=>document.querySelector(s);let state={},me=null,inventory=[],audio=null,ctx=null,timer=null;
-function show(id){document.querySelectorAll('.screen').forEach(x=>x.classList.remove('on'));qs('#'+id).classList.add('on')}
-function createRoom(){socket.emit('create',{name:qs('#hostName').value},r=>{if(r.ok){me=r.id;show('lobby')}})}
-function joinRoom(){socket.emit('join',{code:qs('#joinCode').value,name:qs('#joinName').value},r=>{if(r.ok){me=r.id;show('lobby')}else alert(r.error)})}
-function chooseTheme(id){if(state.hostId!==me)return;socket.emit('settings',{themeId:id,roundCount:+qs('#rounds').value})}
-qs('#rounds').onchange=()=>socket.emit('settings',{themeId:state.themeId,roundCount:+qs('#rounds').value});
-function startGame(){socket.emit('start',{},r=>{if(!r.ok)alert(r.error)})}
-function submitAnswer(){let a=qs('#answer');if(!a.value)return;socket.emit('answer',{text:a.value},r=>{qs('#feedback').textContent=r?.correct?'✅ +'+r.points:'❌';if(r?.correct)a.value='';setTimeout(()=>qs('#feedback').textContent='',900)})}
-function synth(notes){if(!notes)return;ctx=ctx||new(window.AudioContext||window.webkitAudioContext)();let t=ctx.currentTime+.05;notes.forEach((f,i)=>{let o=ctx.createOscillator(),g=ctx.createGain();o.type='sawtooth';o.frequency.value=f;g.gain.setValueAtTime(.0001,t+i*.45);g.gain.exponentialRampToValueAtTime(.11,t+i*.45+.03);g.gain.exponentialRampToValueAtTime(.0001,t+i*.45+.4);o.connect(g).connect(ctx.destination);o.start(t+i*.45);o.stop(t+i*.45+.42)});setTimeout(()=>{if(state.phase==='playing')synth(notes)},notes.length*450)}
-function playClip(clip,notes,startsAt){let go=()=>{if(clip){audio=new Audio(clip);audio.play().catch(()=>{})}else synth(notes)};setTimeout(go,Math.max(0,startsAt-Date.now()))}
-function render(){if(!state.code)return;qs('#roomCode').textContent=state.code;qs('#players').innerHTML=state.players.map(p=>'<div class="player"><span>'+p.name+(p.host?' 👑':'')+'</span><span>'+p.score+'</span></div>').join('');qs('#themes').innerHTML=state.themes.map(t=>'<div class="theme '+(t.id===state.themeId?'sel':'')+'" onclick="chooseTheme(\''+t.id+'\')"><div style="font-size:28px">'+t.emoji+'</div><b>'+t.name+'</b><small>'+t.provider+'</small></div>').join('');qs('#rounds').value=state.roundCount;qs('#startBtn').style.display=state.hostId===me?'inline-block':'none';qs('#scores').innerHTML=[...state.players].sort((a,b)=>b.score-a.score).map((p,i)=>'<div class="score"><span>'+(i+1)+'. '+p.name+(p.shield?' 🛡️':'')+'</span><b>'+p.score+'</b></div>').join('');if(state.phase==='lobby')show('lobby');else if(['loading','playing','reveal'].includes(state.phase))show('game')}
-function powerName(t){return{shield:'🛡️ Bouclier',freeze:'❄️ Freeze',blackout:'🌑 Blackout',tax:'💸 Taxe'}[t]}
-function useBonus(id,type){if(type==='shield')return socket.emit('bonus',{bonusId:id});let others=state.players.filter(p=>p.id!==me);let names=others.map((p,i)=>(i+1)+' '+p.name).join('\n');let n=prompt('Choisis un adversaire :\n'+names);let p=others[(+n||0)-1];if(p)socket.emit('bonus',{bonusId:id,targetId:p.id})}
-function renderInv(){qs('#inv').innerHTML=inventory.length?inventory.map(b=>'<div class="power"><span>'+powerName(b.type)+'</span><button class="btn ghost" onclick="useBonus(\''+b.id+'\',\''+b.type+'\')">Utiliser</button></div>').join(''):'<p>Aucun bonus pour le moment.</p>'}
-socket.on('room',r=>{state=r;render()});socket.on('inv',x=>{inventory=x;renderInv()});socket.on('round',r=>{qs('#reveal').classList.remove('on');qs('#finish').classList.remove('on');qs('#roundLabel').textContent='Manche '+r.round+' / '+r.total;qs('#answer').disabled=false;playClip(r.clip,r.notes,r.startsAt);clearInterval(timer);timer=setInterval(()=>{let left=Math.max(0,r.endsAt-Date.now());qs('#timeText').textContent=(left/1000).toFixed(1)+'s';qs('#bar').style.width=(left/16000*100)+'%'},100)});socket.on('reveal',r=>{if(audio){audio.pause();audio=null}qs('#revealTitle').textContent=r.title;qs('#revealArtist').textContent=r.artist;qs('#reveal').classList.add('on')});socket.on('finished',r=>{qs('#reveal').classList.remove('on');qs('#final').innerHTML=r.ranking.map((p,i)=>'<div class="player"><span>'+(i===0?'🥇 ':i===1?'🥈 ':i===2?'🥉 ':'')+p.name+'</span><b>'+p.score+'</b></div>').join('');qs('#rematch').style.display=state.hostId===me?'inline-block':'none';qs('#finish').classList.add('on')});socket.on('effect',e=>{let app=qs('#app');if(e.type==='freeze'){app.classList.add('black');setTimeout(()=>app.classList.remove('black'),e.ms)}if(e.type==='blackout'){app.classList.add('black');setTimeout(()=>app.classList.remove('black'),e.ms)}if(e.type==='tax')alert(e.source+' t’a volé 200 points 😈')});
-let p=new URLSearchParams(location.search).get('room');if(p)qs('#joinCode').value=p;
-</script></body></html>`));
-server.listen(PORT,()=>console.log('Blind Battle on '+PORT));
+const express = require('express');
+const http = require('http');
+const crypto = require('crypto');
+const path = require('path');
+const { Server } = require('socket.io');
+
+const app = express();
+const server = http.createServer(app);
+const io = new Server(server);
+const PORT = process.env.PORT || 3000;
+
+const rooms = new Map();
+const ROUND = 16000;
+const REVEAL = 3500;
+const BONUS = ['shield', 'freeze', 'blackout', 'tax'];
+
+const demo = [
+  { id: 'neon', name: 'Électro Neon', emoji: '⚡', tracks: [
+    ['Neon Run', 'Nova Circuit', [220, 277, 330, 440]],
+    ['Pixel Hearts', 'Arcade Bloom', [262, 330, 392, 523]],
+    ['Midnight Voltage', 'Static Love', [196, 247, 294, 392]],
+    ['Laser City', 'Night Drive', [233, 294, 349, 466]],
+    ['Chrome Dreams', 'Violet Pulse', [208, 262, 330, 415]],
+    ['Electric Sunrise', 'Future Kids', [247, 311, 370, 494]],
+    ['Digital Fever', 'Mono Club', [220, 294, 349, 440]],
+    ['Afterglow', 'Signal 88', [196, 262, 330, 392]]
+  ]},
+  { id: 'arcade', name: 'Retro Arcade', emoji: '👾', tracks: [
+    ['High Score', 'Bit Runner', [262, 392, 523, 659]],
+    ['Continue?', 'Player Two', [220, 330, 440, 660]],
+    ['Boss Level', '8-Bit Heroes', [196, 294, 392, 587]],
+    ['Extra Life', 'Coin Op', [247, 370, 494, 740]],
+    ['Game Over', 'CRT Kids', [208, 311, 415, 622]],
+    ['Secret Stage', 'Pixel Quest', [233, 349, 466, 698]],
+    ['Power Up', 'Joystick Jam', [262, 330, 494, 659]],
+    ['Warp Zone', 'Level Select', [196, 262, 392, 523]]
+  ]},
+  { id: 'cinema', name: 'Cinématique', emoji: '🎬', tracks: [
+    ['Last Horizon', 'Orion Pictures', [174, 220, 261, 349]],
+    ['The Chase', 'Silver Frame', [196, 247, 294, 392]],
+    ['Final Scene', 'Atlas Orchestra', [165, 220, 330, 440]],
+    ['Hidden City', 'Northlight', [185, 233, 277, 370]],
+    ['No Turning Back', 'Epic Room', [174, 261, 349, 523]],
+    ['First Light', 'Cobalt Score', [196, 294, 440, 587]],
+    ['The Reveal', 'Glass Cinema', [220, 277, 415, 554]],
+    ['End Credits', 'Moonline', [165, 247, 330, 494]]
+  ]}
+];
+
+const extThemes = [
+  ['pop', 'Pop', '🎤', 'pop'],
+  ['rock', 'Rock', '🎸', 'rock'],
+  ['electro', 'Électro', '🪩', 'electronic'],
+  ['hiphop', 'Hip-Hop', '🔥', 'hiphop'],
+  ['funk', 'Funk & Groove', '🕺', 'funk'],
+  ['chill', 'Chill', '🌙', 'chillout']
+];
+
+const jamendoEnabled = () => Boolean(process.env.JAMENDO_CLIENT_ID);
+const themes = () => [
+  ...demo.map(x => ({ id: x.id, name: x.name, emoji: x.emoji, provider: 'demo' })),
+  ...(jamendoEnabled() ? extThemes.map(([id, name, emoji]) => ({ id, name, emoji, provider: 'jamendo' })) : [])
+];
+
+function norm(s = '') {
+  return String(s).toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]+/g, ' ').trim();
+}
+function isCorrect(guess, track) {
+  const g = norm(guess);
+  return track.accepted.some(a => {
+    const answer = norm(a);
+    return g === answer || (g.length > 6 && answer.length > 6 && answer.includes(g));
+  });
+}
+function roomCode() {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  let code;
+  do code = Array.from({ length: 5 }, () => chars[Math.floor(Math.random() * chars.length)]).join('');
+  while (rooms.has(code));
+  return code;
+}
+function playerView(p) {
+  return { id: p.id, name: p.name, score: p.score, streak: p.streak, host: p.host, shield: p.shield, bonusCount: p.inv.length };
+}
+function roomView(r) {
+  return { code: r.code, phase: r.phase, themeId: r.themeId, roundCount: r.roundCount, roundIndex: r.roundIndex, players: [...r.players.values()].map(playerView), hostId: r.hostId, themes: themes() };
+}
+function sendRoom(r) {
+  io.to(r.code).emit('room', roomView(r));
+  for (const p of r.players.values()) io.to(p.id).emit('inv', p.inv);
+}
+function shuffle(input) {
+  const a = [...input];
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+async function buildQueue(themeId, n) {
+  const local = demo.find(x => x.id === themeId);
+  if (local) return shuffle(local.tracks).slice(0, n).map(([title, artist, notes]) => ({ title, artist, notes, accepted: [title, artist] }));
+  if (!jamendoEnabled()) throw new Error('music');
+  const ext = extThemes.find(x => x[0] === themeId);
+  if (!ext) throw new Error('theme');
+  const url = new URL('https://api.jamendo.com/v3.0/tracks/');
+  url.searchParams.set('client_id', process.env.JAMENDO_CLIENT_ID);
+  url.searchParams.set('format', 'json');
+  url.searchParams.set('limit', Math.max(20, n * 3));
+  url.searchParams.set('tags', ext[3]);
+  url.searchParams.set('audioformat', 'mp32');
+  url.searchParams.set('order', 'popularity_total');
+  const response = await fetch(url);
+  if (!response.ok) throw new Error('jamendo');
+  const data = await response.json();
+  return shuffle(data.results || []).slice(0, n).map(x => ({ title: x.name, artist: x.artist_name, clip: x.audio, accepted: [x.name, x.artist_name] }));
+}
+function finishRound(r) {
+  if (r.phase !== 'playing') return;
+  clearTimeout(r.timer);
+  r.phase = 'reveal';
+  const t = r.current;
+  for (const p of r.players.values()) if (!r.correct.has(p.id)) p.streak = 0;
+  io.to(r.code).emit('reveal', { title: t.title, artist: t.artist });
+  sendRoom(r);
+  r.timer = setTimeout(() => r.roundIndex >= r.q.length - 1 ? finishGame(r) : startRound(r), REVEAL);
+}
+function startRound(r) {
+  r.phase = 'playing';
+  r.roundIndex++;
+  r.current = r.q[r.roundIndex];
+  r.correct = new Set();
+  r.first = null;
+  const startsAt = Date.now() + 900;
+  r.ends = startsAt + ROUND;
+  io.to(r.code).emit('round', { round: r.roundIndex + 1, total: r.q.length, startsAt, endsAt: r.ends, clip: r.current.clip || null, notes: r.current.notes || null, themeId: r.themeId });
+  sendRoom(r);
+  r.timer = setTimeout(() => finishRound(r), ROUND + 900);
+}
+function finishGame(r) {
+  r.phase = 'finished';
+  clearTimeout(r.timer);
+  io.to(r.code).emit('finished', { ranking: [...r.players.values()].sort((a, b) => b.score - a.score).map(playerView) });
+  sendRoom(r);
+}
+function maybeAward(p) {
+  const chance = p.streak >= 2 ? 0.65 : 0.38;
+  if (p.inv.length >= 2 || Math.random() > chance) return;
+  p.inv.push({ id: crypto.randomUUID(), type: BONUS[Math.floor(Math.random() * BONUS.length)] });
+}
+
+io.on('connection', socket => {
+  console.log('socket connected', socket.id);
+  socket.emit('themes', themes());
+
+  socket.on('create', ({ name } = {}, cb = () => {}) => {
+    const code = roomCode();
+    const p = { id: socket.id, name: String(name || 'Player').slice(0, 18), score: 0, streak: 0, host: true, shield: false, inv: [] };
+    const r = { code, hostId: socket.id, players: new Map([[socket.id, p]]), phase: 'lobby', themeId: themes()[0].id, roundCount: 6, roundIndex: -1, q: [], timer: null };
+    rooms.set(code, r);
+    socket.join(code);
+    socket.data.code = code;
+    console.log('room created', code, p.name);
+    cb({ ok: true, code, id: socket.id });
+    sendRoom(r);
+  });
+
+  socket.on('join', ({ code, name } = {}, cb = () => {}) => {
+    const normalizedCode = String(code || '').toUpperCase().trim();
+    const r = rooms.get(normalizedCode);
+    if (!r) return cb({ ok: false, error: 'Salon introuvable' });
+    if (r.phase !== 'lobby') return cb({ ok: false, error: 'Partie déjà commencée' });
+    if (r.players.size >= 8) return cb({ ok: false, error: 'Salon complet' });
+    const p = { id: socket.id, name: String(name || 'Player').slice(0, 18), score: 0, streak: 0, host: false, shield: false, inv: [] };
+    r.players.set(socket.id, p);
+    socket.join(normalizedCode);
+    socket.data.code = normalizedCode;
+    console.log('room joined', normalizedCode, p.name);
+    cb({ ok: true, code: normalizedCode, id: socket.id });
+    sendRoom(r);
+  });
+
+  socket.on('settings', x => {
+    const r = rooms.get(socket.data.code);
+    if (!r || r.hostId !== socket.id || r.phase !== 'lobby') return;
+    if (themes().some(t => t.id === x.themeId)) r.themeId = x.themeId;
+    r.roundCount = Math.max(3, Math.min(8, Number(x.roundCount) || 6));
+    sendRoom(r);
+  });
+
+  socket.on('start', async (_, cb = () => {}) => {
+    const r = rooms.get(socket.data.code);
+    if (!r || r.hostId !== socket.id) return cb({ ok: false, error: 'Seul l’hôte peut lancer la partie' });
+    try {
+      r.phase = 'loading';
+      sendRoom(r);
+      r.q = await buildQueue(r.themeId, r.roundCount);
+      r.roundIndex = -1;
+      for (const p of r.players.values()) {
+        p.score = 0; p.streak = 0; p.shield = false; p.inv = []; p.frozenUntil = 0;
+      }
+      cb({ ok: true });
+      startRound(r);
+    } catch (err) {
+      console.error('start error', err);
+      r.phase = 'lobby';
+      sendRoom(r);
+      cb({ ok: false, error: 'Impossible de charger la musique' });
+    }
+  });
+
+  socket.on('answer', ({ text } = {}, cb = () => {}) => {
+    const r = rooms.get(socket.data.code);
+    const p = r?.players.get(socket.id);
+    if (!r || !p || r.phase !== 'playing' || r.correct.has(p.id)) return cb({ ok: false });
+    if (Date.now() < (p.frozenUntil || 0)) return cb({ ok: false, error: 'freeze' });
+    if (!isCorrect(text, r.current)) return cb({ ok: true, correct: false });
+    const remaining = Math.max(0, r.ends - Date.now());
+    let points = Math.round(520 + 680 * (remaining / ROUND) + Math.min(225, p.streak * 75));
+    p.streak++;
+    if (!r.first) { r.first = p.id; points += 150; }
+    p.score += points;
+    r.correct.add(p.id);
+    maybeAward(p);
+    io.to(p.id).emit('answerResult', { correct: true, points });
+    io.to(r.code).emit('correct', { name: p.name, id: p.id });
+    sendRoom(r);
+    cb({ ok: true, correct: true, points });
+  });
+
+  socket.on('bonus', ({ bonusId, targetId } = {}, cb = () => {}) => {
+    const r = rooms.get(socket.data.code);
+    const p = r?.players.get(socket.id);
+    if (!r || !p) return cb({ ok: false });
+    const index = p.inv.findIndex(b => b.id === bonusId);
+    if (index < 0) return cb({ ok: false });
+    const b = p.inv[index];
+    if (b.type === 'shield') {
+      p.shield = true;
+      p.inv.splice(index, 1);
+      sendRoom(r);
+      return cb({ ok: true });
+    }
+    const target = r.players.get(targetId);
+    if (!target || target.id === p.id) return cb({ ok: false });
+    p.inv.splice(index, 1);
+    const blocked = target.shield;
+    if (blocked) target.shield = false;
+    else if (b.type === 'freeze') {
+      target.frozenUntil = Date.now() + 4000;
+      io.to(target.id).emit('effect', { type: 'freeze', ms: 4000, source: p.name });
+    } else if (b.type === 'blackout') {
+      io.to(target.id).emit('effect', { type: 'blackout', ms: 4000, source: p.name });
+    } else if (b.type === 'tax') {
+      target.score = Math.max(0, target.score - 200);
+      io.to(target.id).emit('effect', { type: 'tax', source: p.name });
+    }
+    sendRoom(r);
+    cb({ ok: true, blocked });
+  });
+
+  socket.on('rematch', () => {
+    const r = rooms.get(socket.data.code);
+    if (!r || r.hostId !== socket.id) return;
+    r.phase = 'lobby';
+    r.roundIndex = -1;
+    sendRoom(r);
+  });
+
+  socket.on('disconnect', reason => {
+    console.log('socket disconnected', socket.id, reason);
+    const r = rooms.get(socket.data.code);
+    if (!r) return;
+    r.players.delete(socket.id);
+    if (!r.players.size) {
+      clearTimeout(r.timer);
+      rooms.delete(r.code);
+      return;
+    }
+    if (r.hostId === socket.id) {
+      const next = r.players.values().next().value;
+      next.host = true;
+      r.hostId = next.id;
+    }
+    sendRoom(r);
+  });
+});
+
+app.get('/api/health', (_, res) => res.json({ ok: true, music: jamendoEnabled() ? 'jamendo+demo' : 'demo' }));
+app.use(express.static(path.join(__dirname, 'public')));
+app.get('*', (_, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
+
+server.listen(PORT, '0.0.0.0', () => console.log(`Blind Battle on ${PORT}`));
